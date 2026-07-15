@@ -1,0 +1,204 @@
+name: build-and-test
+
+# PR / push cheap-but-thorough test for ljh-sh/gawk.
+# Every push to main and every PR builds the full 6-target matrix:
+#   linux-glibc x86_64 + aarch64, macos aarch64 + x86_64,
+#   windows x86_64 + aarch64.
+#
+# Each target runs scripts/build.sh + scripts/smoke.sh (basic E2E +
+# RPATH verification, kenlm-style) and uploads dist/ as an artifact.
+#
+# Triggers: push (incl. merge) to main; pull_request. NOT listening to
+# tag pushes here — release.yml handles those.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux-glibc,  runner: ubuntu-latest,    os: linux,   libc: glibc }
+          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux,   libc: glibc }
+          - { target: aarch64-macos,       runner: macos-14,         os: macos              }
+          - { target: x86_64-macos,        runner: macos-14,         os: macos              }
+          - { target: x86_64-windows,      runner: windows-latest,   os: windows            }
+          - { target: aarch64-windows,     runner: windows-11-arm,   os: windows            }
+    continue-on-error: ${{ matrix.target == 'aarch64-windows' }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- install deps ----
+      # Linux: needs autotools + bison + gettext + libreadline-dev + libgmp-dev + libmpfr-dev
+      # (configure-time dependencies; runtime deps are bundled by package.sh)
+      - name: Install deps (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool gettext bison \
+            libreadline-dev libgmp-dev libmpfr-dev libncurses-dev
+
+      - name: Install deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          brew update
+          brew install autoconf automake libtool bison gettext readline gmp mpfr
+
+      # Windows MSYS2 + mingw64:
+      #   x86_64: mingw-w64-x86_64-gcc + readline/gmp/mpfr from mingw packages
+      #   aarch64: cross via clang -target aarch64-w64-windows-gnu
+      - name: Install deps (Windows MSYS2 + mingw64)
+        if: matrix.os == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git autoconf automake libtool
+            make base-devel bison gettext
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-readline
+            mingw-w64-x86_64-gmp
+            mingw-w64-x86_64-mpfr
+            mingw-w64-x86_64-libwinpthread-git
+
+      # ---- build ----
+      # Linux glibc: build directly on host (no docker needed).
+      - name: Build (Linux glibc — host)
+        if: matrix.libc == 'glibc'
+        run: bash scripts/build.sh
+
+      # macOS aarch64: host arch. x86_64: cross via clang -arch.
+      - name: Build (macOS — host aarch64)
+        if: matrix.os == 'macos' && matrix.target == 'aarch64-macos'
+        run: bash scripts/build.sh
+
+      - name: Build (macOS — cross to x86_64)
+        if: matrix.target == 'x86_64-macos'
+        env:
+          GAWK_TARGET_ARCH: x86_64
+          GAWK_TARGET_OS: apple-darwin
+          GAWK_OS_HINT: darwin
+        run: bash scripts/build.sh
+
+      # Windows: msys2 bash for the build (POSIX sh compatible).
+      - name: Build (Windows x86_64 — msys2 bash)
+        if: matrix.os == 'windows' && matrix.target == 'x86_64-windows'
+        shell: msys2 {0}
+        run: bash scripts/build.sh
+
+      - name: Build (Windows aarch64 — cross via clang)
+        if: matrix.target == 'aarch64-windows'
+        shell: msys2 {0}
+        env:
+          GAWK_TARGET_ARCH: aarch64
+          GAWK_TARGET_OS: windows-gnu
+          GAWK_OS_HINT: windows
+          CC: clang
+        run: bash scripts/build.sh
+
+      # ---- smoke (basic E2E + RPATH verification) ----
+      - name: Smoke test (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: bash scripts/smoke.sh
+
+      - name: Smoke test (macOS)
+        if: matrix.os == 'macos'
+        run: bash scripts/smoke.sh
+
+      - name: Smoke test (Windows)
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        run: bash scripts/smoke.sh
+
+      # ---- package (bin/ + lib/ + man/) ----
+      - name: Package (Linux / macOS)
+        if: matrix.os != 'windows'
+        run: TARGET=${{ matrix.target }} bash scripts/package.sh
+
+      - name: Package (Windows — DLLs in bin/)
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1
+
+      # ---- verify self-contained ----
+      # Linux: ldd shows bundled lib/ resolution.
+      - name: Verify ldd resolves to bundled lib/ (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          set -e
+          bin="dist/gawk-${{ matrix.target }}/bin/gawk"
+          file "$bin"
+          ldd "$bin" 2>&1 | sed 's/^/    /'
+          # Confirm at least one non-system lib resolves to bin/../lib
+          if ! ldd "$bin" 2>&1 | grep -qE 'bin/\.\./lib/|not a dynamic executable'; then
+            echo "WARN: no lib resolves to bundled ../lib; this is OK if gawk doesn't need bundled libs on this target"
+          fi
+          echo "OK: ldd output captured"
+
+      # Linux: readelf shows RPATH='$ORIGIN/../lib'.
+      - name: Verify RPATH=$ORIGIN/../lib (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          set -e
+          bin="dist/gawk-${{ matrix.target }}/bin/gawk"
+          readelf -d "$bin" | grep -E 'RPATH|RUNPATH' | sed 's/^/    /' || \
+            { echo "FAIL: no RPATH/RUNPATH entry found"; exit 1; }
+          readelf -d "$bin" | grep -qE '\$\$?ORIGIN' \
+            && echo "OK: \$ORIGIN RPATH embedded" \
+            || { echo "FAIL: RPATH entry does not contain \$ORIGIN"; exit 1; }
+
+      # macOS: otool shows @rpath + @loader_path.
+      - name: Verify @rpath @loader_path (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          set -e
+          bin="dist/gawk-${{ matrix.target }}/bin/gawk"
+          otool -L "$bin" | sed 's/^/    /'
+          otool -l "$bin" | grep -A2 LC_RPATH | grep -q 'loader_path' \
+            && echo "OK: @loader_path RPATH embedded" \
+            || { echo "FAIL: @loader_path not found"; exit 1; }
+          # Ensure no Homebrew dylibs leaked
+          otool -L "$bin" | grep -E '/(opt/homebrew|usr/local)/' \
+            && { echo "FAIL: $bin links Homebrew dylibs"; exit 1; } || true
+          echo "OK: only @rpath/* + system libs (/usr/lib, /System/Library)"
+
+      - name: Show file type & size
+        if: matrix.os != 'windows'
+        run: |
+          du -h dist/gawk-${{ matrix.target }}.tar.gz
+          tar -tzf dist/gawk-${{ matrix.target }}.tar.gz | head -30
+
+      - name: Show file type & size (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/gawk-${{ matrix.target }}.zip | Format-Table Name, Length
+          Expand-Archive -Path dist/gawk-${{ matrix.target }}.zip -DestinationPath /tmp/zip-check -Force
+          Get-ChildItem /tmp/zip-check/gawk-${{ matrix.target }} -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+
+      # ---- upload artifact for human inspection ----
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gawk-test-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

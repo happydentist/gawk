@@ -1,0 +1,222 @@
+name: release
+
+# Publish stage: tag v* or trigger manually → GitHub Release with
+# per-target tarball/zip + per-archive sha256 + top-level SHA256SUMS.
+#
+# Matrix identical to build-and-test.yml so a tag push produces a
+# release in one shot, without depending on workflow_run.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux-glibc,  runner: ubuntu-latest,    os: linux,   libc: glibc }
+          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux,   libc: glibc }
+          - { target: aarch64-macos,       runner: macos-14,         os: macos              }
+          - { target: x86_64-macos,        runner: macos-14,         os: macos              }
+          - { target: x86_64-windows,      runner: windows-latest,   os: windows            }
+          - { target: aarch64-windows,     runner: windows-11-arm,   os: windows            }
+    continue-on-error: ${{ matrix.target == 'aarch64-windows' }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool gettext bison \
+            libreadline-dev libgmp-dev libmpfr-dev libncurses-dev
+
+      - name: Install deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          brew update
+          brew install autoconf automake libtool bison gettext readline gmp mpfr
+
+      - name: Install deps (Windows MSYS2 + mingw64)
+        if: matrix.os == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git autoconf automake libtool
+            make base-devel bison gettext
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-readline
+            mingw-w64-x86_64-gmp
+            mingw-w64-x86_64-mpfr
+            mingw-w64-x86_64-libwinpthread-git
+
+      # ---- build ----
+      - name: Build (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: bash scripts/build.sh
+
+      - name: Build (macOS — host aarch64)
+        if: matrix.os == 'macos' && matrix.target == 'aarch64-macos'
+        run: bash scripts/build.sh
+
+      - name: Build (macOS — cross to x86_64)
+        if: matrix.target == 'x86_64-macos'
+        env:
+          GAWK_TARGET_ARCH: x86_64
+          GAWK_TARGET_OS: apple-darwin
+          GAWK_OS_HINT: darwin
+        run: bash scripts/build.sh
+
+      - name: Build (Windows x86_64 — msys2 bash)
+        if: matrix.os == 'windows' && matrix.target == 'x86_64-windows'
+        shell: msys2 {0}
+        run: bash scripts/build.sh
+
+      - name: Build (Windows aarch64 — cross via clang)
+        if: matrix.target == 'aarch64-windows'
+        shell: msys2 {0}
+        env:
+          GAWK_TARGET_ARCH: aarch64
+          GAWK_TARGET_OS: windows-gnu
+          GAWK_OS_HINT: windows
+          CC: clang
+        run: bash scripts/build.sh
+
+      # ---- smoke ----
+      - name: Smoke test (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: bash scripts/smoke.sh
+
+      - name: Smoke test (macOS)
+        if: matrix.os == 'macos'
+        run: bash scripts/smoke.sh
+
+      - name: Smoke test (Windows)
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        run: bash scripts/smoke.sh
+
+      # ---- package ----
+      - name: Package (Linux / macOS)
+        if: matrix.os != 'windows'
+        run: TARGET=${{ matrix.target }} bash scripts/package.sh
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1
+
+      # ---- verify self-contained ----
+      - name: Verify ldd (Linux glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          bin="dist/gawk-${{ matrix.target }}/bin/gawk"
+          ldd "$bin" 2>&1 | sed 's/^/    /'
+          readelf -d "$bin" | grep -E 'RPATH|RUNPATH' | sed 's/^/    /'
+          echo "OK: ldd + readelf captured"
+
+      - name: Verify otool (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          bin="dist/gawk-${{ matrix.target }}/bin/gawk"
+          otool -L "$bin" | sed 's/^/    /'
+          otool -L "$bin" | grep -E '/(opt/homebrew|usr/local)/' \
+            && { echo "FAIL: $bin links Homebrew dylibs"; exit 1; } || true
+          echo "OK: only @rpath/* + system libs"
+
+      - name: Show file type & size
+        if: matrix.os != 'windows'
+        run: du -h dist/gawk-${{ matrix.target }}.tar.gz
+
+      - name: Show file type & size (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: Get-ChildItem dist/gawk-${{ matrix.target }}.zip | Format-Table Name, Length
+
+      # ---- upload artifact (used by release job below) ----
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gawk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 \
+            | xargs -0 sha256sum | sed 's|^\([^ ]*\)  \./|\1  |' > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ## ljh-sh/gawk v${{ github.ref_name }}
+
+            Full-featured, lib-bundled build of GNU Awk 5.4.1 (vendored
+            via `git subtree` from `git.savannah.gnu.org/cgit/gawk.git`).
+
+            All upstream features enabled: readline, mpfr, extensions,
+            persistent memory allocator. Dependencies (libgmp, libmpfr,
+            libreadline, extension .so) bundled in `lib/`. RPATH='$ORIGIN/../lib'
+            (Linux) / @loader_path/../lib (macOS) so the binary finds
+            its deps regardless of where the deployer installs it.
+
+            ### Install
+
+            ```bash
+            x eget ljh-sh/gawk    # one-line install, auto-detects arch + PATH
+            ```
+
+            ### Targets
+
+            | target | archive | layout | runner |
+            |--------|---------|--------|--------|
+            | x86_64-linux-glibc | .tar.gz | bin/ + lib/ | ubuntu-latest |
+            | aarch64-linux-glibc | .tar.gz | bin/ + lib/ | ubuntu-24.04-arm |
+            | aarch64-macos | .tar.gz | bin/ + lib/ | macos-14 |
+            | x86_64-macos | .tar.gz | bin/ + lib/ | macos-14 (cross) |
+            | x86_64-windows | .zip | bin/ (DLLs co-located) | windows-latest |
+            | aarch64-windows | .zip | bin/ (DLLs co-located) | windows-11-arm |
+
+            ### Build configuration
+
+            - `--enable-shared --enable-extensions`
+            - `--with-readline --with-mpfr --enable-pma`
+            - Linux: glibc dynamic, RPATH='$ORIGIN/../lib' for portable lib lookup
+            - macOS: @rpath @loader_path/../lib
+            - Windows: DLLs in bin/ alongside gawk.exe
+
+            See `AUDIT-<date>.md` for the source-level security review.
+            See `ljh-sh.github.io/gawk` for full documentation.

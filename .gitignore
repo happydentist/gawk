@@ -1,0 +1,22 @@
+# Build artifacts (out-of-tree build.sh creates these)
+build/
+dist/
+*.tar.gz
+*.tar.gz.sha256
+*.zip
+*.zip.sha256
+SHA256SUMS
+
+# Worktrees (ljh-sh convention)
+.worktrees/
+
+# Editor / OS
+*.swp
+*.swo
+.DS_Store
+*.orig
+*.rej
+
+# Local config / scratch
+.env
+*.local

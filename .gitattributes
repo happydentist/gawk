@@ -1,0 +1,12 @@
+# Normalize line endings (LF for source, CRLF for Windows scripts)
+*               text=auto eol=lf
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+
+# Vendored upstream gawk is treated as read-only (don't reformat)
+upstream/gawk/** -text merge=binary
+
+# Binary diffs for vendored tarballs
+*.tar.xz        binary
+*.tar.gz        binary
+*.zip           binary
