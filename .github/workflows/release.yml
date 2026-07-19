@@ -219,4 +219,4 @@ jobs:
             - Windows: DLLs in bin/ alongside gawk.exe
 
             See `AUDIT-<date>.md` for the source-level security review.
-            See `ljh-sh.github.io/gawk` for full documentation.
+            See `gawk.ljh.sh` for full documentation.

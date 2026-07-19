@@ -172,7 +172,7 @@ scripts/
 .github/workflows/
   build-and-test.yml  # push + PR: full 6-target matrix + artifact upload
   release.yml         # v* tag + dispatch: same matrix + GitHub Release
-docs/                 # GitHub Pages content (ljh-sh.github.io/gawk)
+docs/                 # GitHub Pages content (gawk.ljh.sh)
 AUDIT-2026-07-15.md   # source-level security audit
 SECURITY.md           # vulnerability reporting policy
 NOTICE.md             # wrapper MIT + upstream GPL-3.0 split
@@ -192,7 +192,7 @@ source-level audit. Headline: 1 HIGH (AWKPATH, no build-time fix),
 
 ## Pages
 
-Full documentation at <https://ljh-sh.github.io/gawk/>: install
+Full documentation at <https://gawk.ljh.sh/>: install
 instructions, audit summary, threat model, build matrix status, CI
 smoke results, links back to this repository.
 
