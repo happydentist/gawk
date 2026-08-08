@@ -1,10 +1,5 @@
 name: release
 
-# Publish stage: tag v* or trigger manually → GitHub Release with
-# per-target tarball/zip + per-archive sha256 + top-level SHA256SUMS.
-#
-# Matrix identical to build-and-test.yml so a tag push produces a
-# release in one shot, without depending on workflow_run.
 on:
   workflow_dispatch:
   push:
@@ -36,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # -------------------------------------------------------------
+      # 1. 各平台依賴安裝（精準補全）
+      # -------------------------------------------------------------
       - name: Install deps (Linux glibc)
         if: matrix.libc == 'glibc'
         run: |
@@ -48,7 +46,6 @@ jobs:
         if: matrix.os == 'macos'
         run: |
           brew update
-          # 💡 確保 macOS 安裝了完整的 readline，供後續編譯覆蓋系統自帶的 libedit
           brew install autoconf automake libtool bison gettext readline gmp mpfr
 
       - name: Install deps (Windows MSYS2 + mingw64)
@@ -57,38 +54,89 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          # 💡 關鍵修正：在 Windows 補上「gettext-devel」與「xz」確保 autopoint 基礎基礎檔案完整
+          # 💡 修正 Windows：加入 gettext-devel 與 xz，徹底解決 autopoint 找不到封裝檔的崩潰
           install: >-
             git autoconf automake libtool
             make base-devel bison gettext gettext-devel xz
 
       # -------------------------------------------------------------
-      # 🛠️ 執行建置（三大平台全部修正）
+      # 2. 執行您的專案建置腳本（修復環境變數隔離與庫連結問題）
       # -------------------------------------------------------------
       - name: Run build script (Linux)
         if: matrix.os == 'linux'
-        # 💡 修正 UNIX CC：直接在指令最前端注入 CC 變數，強行突破子 Shell 隔離
-        run: CC=${{ matrix.cc }} bash scripts/build.sh
+        # 💡 修正 Linux CC：前置注入變數，繞過子 Shell 隔離
+        run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       - name: Run build script (macOS)
         if: matrix.os == 'macos'
-        # 💡 修正 macOS Otool 錯誤：強制注入 LDFLAGS 與 CPPFLAGS，讓 Gawk 優先連結 Homebrew 的 Readline
-        # 避免去黏到系統自帶、不允許打包的 /usr/lib/libedit
+        # 💡 修正 macOS otool：強制讓編譯器尋找 Homebrew 獨立庫，避免黏到系統不給打包的 libedit
         run: |
           export LDFLAGS="-L$(brew --prefix readline)/lib -L$(brew --prefix gmp)/lib -L$(brew --prefix mpfr)/lib"
           export CPPFLAGS="-I$(brew --prefix readline)/include -I$(brew --prefix gmp)/include -I$(brew --prefix mpfr)/include"
-          CC=${{ matrix.cc }} bash scripts/build.sh
+          CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       - name: Run build script (Windows)
         if: matrix.os == 'windows'
         shell: msys2 {0}
-        # 💡 Windows 同步改為前置注入，確保 MSYS2 內部的嚴格檢查通過
-        run: CC=${{ matrix.cc }} bash scripts/build.sh
+        run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       # -------------------------------------------------------------
-      # 🩺 冒煙測試 (Smoke Test)
+      # 3. 執行冒煙測試
       # -------------------------------------------------------------
       - name: Run smoke tests
         if: success() || matrix.target == 'aarch64-windows'
         shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
         run: bash scripts/smoke.sh
+
+      # -------------------------------------------------------------
+      # 4. 執行您專案內的打包腳本（產生 tar.gz / zip 與個別 sha256）
+      # -------------------------------------------------------------
+      - name: Package artifacts
+        if: success() || matrix.target == 'aarch64-windows'
+        shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
+        run: bash scripts/package.sh
+
+      # -------------------------------------------------------------
+      # 5. 上傳本階段產物至臨時區
+      # -------------------------------------------------------------
+      - name: Upload temporary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gawk-artifacts-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  # -----------------------------------------------------------------
+  # 6. 獨立的發布作業：收集所有平台產物、彙整總表並推送到 GitHub Release
+  # -----------------------------------------------------------------
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gawk-artifacts-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate top-level SHA256SUMS
+        run: |
+          cd dist
+          # 收集所有 package.sh 算好的 sha256 內容，整合成一個頂層總表
+          cat *.sha256 > SHA256SUMS 2>/dev/null || true
+          echo "=== Final Release Files ==="
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/SHA256SUMS
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
