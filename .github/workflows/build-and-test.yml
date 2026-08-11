@@ -11,10 +11,7 @@ name: build-and-test
 # Triggers: push (incl. merge) to main; pull_request. NOT listening to
 # tag pushes here — release.yml handles those.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+
 
 permissions:
   contents: read
