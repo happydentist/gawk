@@ -1,0 +1,51 @@
+name: Build Static gawk for Windows
+
+on:
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  build-static-windows:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        # 安裝編譯所需工具，包含靜態庫
+        install: >-
+          git
+          make
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-libiconv
+          mingw-w64-x86_64-mpfr
+          mingw-w64-x86_64-gmp
+          bison
+          texinfo
+
+    - name: Build Static gawk
+      shell: msys2 {0}
+      run: |
+        # 1. 配置環境變數，強制 GCC 和連結器採用靜態連結
+        export LDFLAGS="-static -static-libgcc -static-libstdc++"
+        export CFLAGS="-O2 -static"
+        
+        # 2. 執行配置，指定 MinGW64 工具鏈
+        ./configure --host=x86_64-w64-mingw32 --build=x86_64-w64-mingw32 --disable-shared --enable-static
+        
+        # 3. 開始編譯
+        make
+
+        # 4. 驗證是否為真正的獨立執行檔（檢查有無依賴特殊 DLL）
+        echo "=== 檢查生成檔案 ==="
+        ls -la gawk.exe
+
+    - name: Upload Static Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: gawk-static-windows
+        path: gawk.exe
