@@ -19,12 +19,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-linux-glibc,  runner: ubuntu-latest,    os: linux,   libc: glibc, cc: gcc }
-          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux,   libc: glibc, cc: gcc }
-          - { target: aarch64-macos,       runner: macos-14,         os: macos,                cc: clang }
-          - { target: x86_64-macos,        runner: macos-14,         os: macos,                cc: clang }
-          - { target: x86_64-windows,      runner: windows-latest,   os: windows,              cc: gcc }
-          - { target: aarch64-windows,     runner: windows-11-arm,   os: windows,              cc: gcc }
+          - { target: x86_64-linux-glibc, runner: ubuntu-latest, os: linux, libc: glibc, cc: gcc, shell: bash }
+          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux, libc: glibc, cc: gcc, shell: bash }
+          - { target: aarch64-macos, runner: macos-14, os: macos, cc: clang, shell: bash }
+          - { target: x86_64-macos, runner: macos-14, os: macos, cc: clang, shell: bash }
+          - { target: x86_64-windows, runner: windows-latest, os: windows, cc: gcc, shell: 'msys2 {0}' }
+          - { target: aarch64-windows, runner: windows-11-arm, os: windows, cc: gcc, shell: 'msys2 {0}' }
     continue-on-error: ${{ matrix.target == 'aarch64-windows' }}
     env:
       TARGET: ${{ matrix.target }}
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # -------------------------------------------------------------
-      # 1. 各平台依賴安裝（精準補全）
+      # 1. 各平台依賴安裝
       # -------------------------------------------------------------
       - name: Install deps (Linux glibc)
         if: matrix.libc == 'glibc'
@@ -54,22 +54,18 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          # 💡 修正 Windows：加入 gettext-devel 與 xz，徹底解決 autopoint 找不到封裝檔的崩潰
           install: >-
-            git autoconf automake libtool
-            make base-devel bison gettext gettext-devel xz
+            git autoconf automake libtool make base-devel bison gettext gettext-devel xz
 
       # -------------------------------------------------------------
-      # 2. 執行您的專案建置腳本（修復環境變數隔離與庫連結問題）
+      # 2. 執行您的專案建置腳本
       # -------------------------------------------------------------
       - name: Run build script (Linux)
         if: matrix.os == 'linux'
-        # 💡 修正 Linux CC：前置注入變數，繞過子 Shell 隔離
         run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       - name: Run build script (macOS)
         if: matrix.os == 'macos'
-        # 💡 修正 macOS otool：強制讓編譯器尋找 Homebrew 獨立庫，避免黏到系統不給打包的 libedit
         run: |
           export LDFLAGS="-L$(brew --prefix readline)/lib -L$(brew --prefix gmp)/lib -L$(brew --prefix mpfr)/lib"
           export CPPFLAGS="-I$(brew --prefix readline)/include -I$(brew --prefix gmp)/include -I$(brew --prefix mpfr)/include"
@@ -77,23 +73,23 @@ jobs:
 
       - name: Run build script (Windows)
         if: matrix.os == 'windows'
-        shell: msys2 {0}
+        shell: ${{ matrix.shell }}
         run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       # -------------------------------------------------------------
-      # 3. 執行冒煙測試
+      # 3. 執行冒煙測試（已修正 shell 報錯）
       # -------------------------------------------------------------
       - name: Run smoke tests
         if: success() || matrix.target == 'aarch64-windows'
-        shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
+        shell: ${{ matrix.shell }}
         run: bash scripts/smoke.sh
 
       # -------------------------------------------------------------
-      # 4. 執行您專案內的打包腳本（產生 tar.gz / zip 與個別 sha256）
+      # 4. 執行您專案內的打包腳本（已修正 shell 報錯）
       # -------------------------------------------------------------
       - name: Package artifacts
         if: success() || matrix.target == 'aarch64-windows'
-        shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
+        shell: ${{ matrix.shell }}
         run: bash scripts/package.sh
 
       # -------------------------------------------------------------
@@ -107,7 +103,7 @@ jobs:
           retention-days: 1
 
   # -----------------------------------------------------------------
-  # 6. 獨立的發布作業：收集所有平台產物、彙整總表並推送到 GitHub Release
+  # 6. 獨立的發布作業
   # -----------------------------------------------------------------
   publish:
     needs: build
@@ -124,7 +120,6 @@ jobs:
       - name: Generate top-level SHA256SUMS
         run: |
           cd dist
-          # 收集所有 package.sh 算好的 sha256 內容，整合成一個頂層總表
           cat *.sha256 > SHA256SUMS 2>/dev/null || true
           echo "=== Final Release Files ==="
           ls -la
