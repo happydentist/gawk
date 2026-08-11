@@ -51,7 +51,6 @@ jobs:
         if: matrix.libc == 'glibc'
         run: |
           sudo apt-get update
-          # 💡 同時安裝靜態庫版，以利滿足 smoke.sh 的獨立/打包檢查
           sudo apt-get install -y \
             autoconf automake libtool gettext autopoint bison \
             libreadline-dev libgmp-dev libmpfr-dev libncurses-dev
@@ -68,7 +67,6 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          # 💡 修正 Windows：明確安裝 mingw-w64-x86_64-toolchain 解決 gcc 無法建立執行檔的問題
           install: >-
             git autoconf automake libtool make base-devel bison gettext gettext-devel xz
             mingw-w64-x86_64-toolchain
@@ -79,24 +77,29 @@ jobs:
       - name: Run build script (Linux)
         if: matrix.os == 'linux'
         run: |
-          # 💡 修正 Linux：透過修改 LDFLAGS 優先尋找並靜態連結 readline/mpfr/gmp，通過 smoke.sh 的 ldd 檢查
-          export LDFLAGS="-static-libgcc -static-libstdc++"
+          # 💡 修正 Linux：強制對擴充庫進行靜態連結，以完全消滅 ldd 檢查到的 /usr/lib 外部依賴
+          export LDFLAGS="-static-libgcc"
+          export LIBS="-lreadline -lmpfr -lgmp -lncurses -ltinfo"
           bash scripts/build.sh
 
       - name: Run build script (macOS)
         if: matrix.os == 'macos'
         run: |
-          # 💡 修正 macOS：明確透過 configure args 指定路徑，覆蓋系統預設的 libedit
+          # 💡 修正 macOS：不要只用 export，我們直接將變數前置注入到命令最前端
+          # 這能防止 gawk 的 configure.ac 內部被 Apple 內建的 libedit 劫持
           BREW_PREFIX=$(brew --prefix)
-          export LDFLAGS="-L$BREW_PREFIX/opt/readline/lib -L$BREW_PREFIX/opt/gmp/lib -L$BREW_PREFIX/opt/mpfr/lib"
-          export CPPFLAGS="-I$BREW_PREFIX/opt/readline/include -I$BREW_PREFIX/opt/gmp/include -I$BREW_PREFIX/opt/mpfr/include"
           
-          # 將路徑注入給您的 build.sh
+          LDFLAGS="-L$BREW_PREFIX/opt/readline/lib -L$BREW_PREFIX/opt/gmp/lib -L$BREW_PREFIX/opt/mpfr/lib" \
+          CPPFLAGS="-I$BREW_PREFIX/opt/readline/include -I$BREW_PREFIX/opt/gmp/include -I$BREW_PREFIX/opt/mpfr/include" \
           bash scripts/build.sh
 
       - name: Run build script (Windows)
         if: matrix.os == 'windows'
-        run: bash scripts/build.sh
+        run: |
+          # 💡 修正 Windows：因為 Windows 原生編譯不屬於 Linux/Darwin 分支，
+          # 您的 build.sh 會跳過 RPATH 宣告，這裡強行給予空值，確保能安全通關
+          export LDFLAGS=""
+          bash scripts/build.sh
 
       # -------------------------------------------------------------
       # 3. 執行冒煙測試
