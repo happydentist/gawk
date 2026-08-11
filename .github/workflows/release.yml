@@ -19,15 +19,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-linux-glibc, runner: ubuntu-latest, os: linux, libc: glibc, cc: gcc, shell: bash }
-          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux, libc: glibc, cc: gcc, shell: bash }
-          - { target: aarch64-macos, runner: macos-14, os: macos, cc: clang, shell: bash }
-          - { target: x86_64-macos, runner: macos-14, os: macos, cc: clang, shell: bash }
-          - { target: x86_64-windows, runner: windows-latest, os: windows, cc: gcc, shell: 'msys2 {0}' }
-          - { target: aarch64-windows, runner: windows-11-arm, os: windows, cc: gcc, shell: 'msys2 {0}' }
+          - { target: x86_64-linux-glibc, runner: ubuntu-latest, os: linux, libc: glibc, cc: gcc }
+          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux, libc: glibc, cc: gcc }
+          - { target: aarch64-macos, runner: macos-14, os: macos, cc: clang }
+          - { target: x86_64-macos, runner: macos-14, os: macos, cc: clang }
+          - { target: x86_64-windows, runner: windows-latest, os: windows, cc: gcc }
+          - { target: aarch64-windows, runner: windows-11-arm, os: windows, cc: gcc }
     continue-on-error: ${{ matrix.target == 'aarch64-windows' }}
     env:
       TARGET: ${{ matrix.target }}
+    
+    # 💡 關鍵修正：在 Job 等級定義預設 shell，這裡完全支援 matrix 變數
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +64,7 @@ jobs:
             git autoconf automake libtool make base-devel bison gettext gettext-devel xz
 
       # -------------------------------------------------------------
-      # 2. 執行您的專案建置腳本
+      # 2. 執行您的專案建置腳本（已移除 steps.shell）
       # -------------------------------------------------------------
       - name: Run build script (Linux)
         if: matrix.os == 'linux'
@@ -73,23 +79,20 @@ jobs:
 
       - name: Run build script (Windows)
         if: matrix.os == 'windows'
-        shell: ${{ matrix.shell }}
         run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
 
       # -------------------------------------------------------------
-      # 3. 執行冒煙測試（已修正 shell 報錯）
+      # 3. 執行冒煙測試（已移除 steps.shell）
       # -------------------------------------------------------------
       - name: Run smoke tests
         if: success() || matrix.target == 'aarch64-windows'
-        shell: ${{ matrix.shell }}
         run: bash scripts/smoke.sh
 
       # -------------------------------------------------------------
-      # 4. 執行您專案內的打包腳本（已修正 shell 報錯）
+      # 4. 執行您專案內的打包腳本（已移除 steps.shell）
       # -------------------------------------------------------------
       - name: Package artifacts
         if: success() || matrix.target == 'aarch64-windows'
-        shell: ${{ matrix.shell }}
         run: bash scripts/package.sh
 
       # -------------------------------------------------------------
