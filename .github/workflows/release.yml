@@ -19,17 +19,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-linux-glibc, runner: ubuntu-latest, os: linux, libc: glibc, cc: gcc }
-          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux, libc: glibc, cc: gcc }
-          - { target: aarch64-macos, runner: macos-14, os: macos, cc: clang }
-          - { target: x86_64-macos, runner: macos-14, os: macos, cc: clang }
-          - { target: x86_64-windows, runner: windows-latest, os: windows, cc: gcc }
-          - { target: aarch64-windows, runner: windows-11-arm, os: windows, cc: gcc }
+          - { target: x86_64-linux-glibc, runner: ubuntu-latest, os: linux, libc: glibc, cc: gcc, arch: x86_64, os_hint: linux }
+          - { target: aarch64-linux-glibc, runner: ubuntu-24.04-arm, os: linux, libc: glibc, cc: gcc, arch: aarch64, os_hint: linux }
+          - { target: aarch64-macos, runner: macos-14, os: macos, cc: clang, arch: aarch64, os_hint: darwin }
+          - { target: x86_64-macos, runner: macos-14, os: macos, cc: clang, arch: x86_64, os_hint: darwin }
+          - { target: x86_64-windows, runner: windows-latest, os: windows, cc: gcc, arch: x86_64, os_hint: windows }
+          - { target: aarch64-windows, runner: windows-11-arm, os: windows, cc: gcc, arch: aarch64, os_hint: windows }
     continue-on-error: ${{ matrix.target == 'aarch64-windows' }}
+    
+    # 💡 關鍵變數注入：對接 build.sh 的變數，並補齊預設值防止 set -u 崩潰
     env:
       TARGET: ${{ matrix.target }}
-    
-    # 💡 關鍵修正：在 Job 等級定義預設 shell，這裡完全支援 matrix 變數
+      CC: ${{ matrix.cc }}
+      HOST: ${{ matrix.cc }}
+      CFLAGS: "-O2"
+      LDFLAGS: ""
+      GAWK_TARGET_ARCH: ${{ matrix.arch }}
+      GAWK_OS_HINT: ${{ matrix.os_hint }}
+      JOBS: "4" # 防止 Windows MSYS2 的 getconf 報錯觸發 set -e
+
     defaults:
       run:
         shell: ${{ matrix.os == 'windows' && 'msys2 {0}' || 'bash' }}
@@ -45,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf automake libtool gettext bison \
+            autoconf automake libtool gettext autopoint bison \
             libreadline-dev libgmp-dev libmpfr-dev libncurses-dev
 
       - name: Install deps (macOS)
@@ -64,32 +72,33 @@ jobs:
             git autoconf automake libtool make base-devel bison gettext gettext-devel xz
 
       # -------------------------------------------------------------
-      # 2. 執行您的專案建置腳本（已移除 steps.shell）
+      # 2. 執行您的專案建置腳本
       # -------------------------------------------------------------
       - name: Run build script (Linux)
         if: matrix.os == 'linux'
-        run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
+        run: bash scripts/build.sh
 
       - name: Run build script (macOS)
         if: matrix.os == 'macos'
         run: |
+          # 讓 Homebrew 的獨立庫順利被 linker 找到
           export LDFLAGS="-L$(brew --prefix readline)/lib -L$(brew --prefix gmp)/lib -L$(brew --prefix mpfr)/lib"
           export CPPFLAGS="-I$(brew --prefix readline)/include -I$(brew --prefix gmp)/include -I$(brew --prefix mpfr)/include"
-          CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
+          bash scripts/build.sh
 
       - name: Run build script (Windows)
         if: matrix.os == 'windows'
-        run: CC=${{ matrix.cc }} HOST=${{ matrix.cc }} bash scripts/build.sh
+        run: bash scripts/build.sh
 
       # -------------------------------------------------------------
-      # 3. 執行冒煙測試（已移除 steps.shell）
+      # 3. 執行冒煙測試
       # -------------------------------------------------------------
       - name: Run smoke tests
         if: success() || matrix.target == 'aarch64-windows'
         run: bash scripts/smoke.sh
 
       # -------------------------------------------------------------
-      # 4. 執行您專案內的打包腳本（已移除 steps.shell）
+      # 4. 執行您專案內的打包腳本
       # -------------------------------------------------------------
       - name: Package artifacts
         if: success() || matrix.target == 'aarch64-windows'
